@@ -1,0 +1,39 @@
+function(blackbird_set_project_optimizations target enable_native_arch)
+    if(MSVC)
+        target_compile_options(
+            ${target}
+            INTERFACE
+                $<$<CONFIG:Release>:/O2>
+                $<$<CONFIG:RelWithDebInfo>:/O2>
+                $<$<CONFIG:Release>:/GL>
+                $<$<CONFIG:RelWithDebInfo>:/GL>
+        )
+        target_link_options(
+            ${target}
+            INTERFACE
+                $<$<CONFIG:Release>:/LTCG>
+                $<$<CONFIG:RelWithDebInfo>:/LTCG>
+        )
+    else()
+        target_compile_options(
+            ${target}
+            INTERFACE
+                $<$<CONFIG:Release>:-O3>
+                $<$<CONFIG:RelWithDebInfo>:-O3>
+                $<$<CONFIG:Release>:-fno-plt>
+                $<$<CONFIG:RelWithDebInfo>:-fno-plt>
+        )
+
+        if(enable_native_arch)
+            target_compile_options(
+                ${target}
+                INTERFACE
+                    $<$<CONFIG:Release>:-march=native>
+                    $<$<CONFIG:RelWithDebInfo>:-march=native>
+                    $<$<CONFIG:Release>:-mtune=native>
+                    $<$<CONFIG:RelWithDebInfo>:-mtune=native>
+            )
+        endif()
+    endif()
+endfunction()
+
