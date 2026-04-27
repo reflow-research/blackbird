@@ -165,6 +165,29 @@ int blackbird_xdp_mcast(struct xdp_md* ctx) {
         return bpf_redirect_map(&tx_ports, cfg_key, 0);
     }
 
+    if (action == BLACKBIRD_XDP_ACTION_REWRITE_PASS) {
+        const unsigned short old_dport = udp->dest;
+        const unsigned short new_dport = cfg->rewrite_dst_port_be;
+        if (new_dport == 0) {
+            return XDP_PASS;
+        }
+
+        udp->dest = new_dport;
+        if (udp->check != 0) {
+            unsigned short udp_csum = udp->check;
+            udp_csum = csum_replace_16(udp_csum, old_dport, udp->dest);
+            if (udp_csum == 0) {
+                udp_csum = 0xffff;
+            }
+            udp->check = udp_csum;
+        }
+
+        if (stats != (void*)0) {
+            stats->pass_packets += 1;
+        }
+        return XDP_PASS;
+    }
+
     if (action == BLACKBIRD_XDP_ACTION_DROP) {
         if (stats != (void*)0) {
             stats->drop_packets += 1;

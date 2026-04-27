@@ -154,6 +154,32 @@ int blackbird_tc_mcast(struct __sk_buff* skb) {
         }
         return TC_ACT_SHOT;
     }
+    if (action == BLACKBIRD_XDP_ACTION_REWRITE_PASS) {
+        const __u16 new_dport = cfg->rewrite_dst_port_be;
+        if (new_dport == 0) {
+            return TC_ACT_OK;
+        }
+
+        const __u32 udp_off = (const __u32)sizeof(struct iphdr);
+        const __u32 udp_csum_off = ip_off + udp_off + 6U;
+        const __u32 udp_dport_off = ip_off + udp_off + 2U;
+        const __u16 old_dport = udp->dest;
+        const __u16 old_udp_check = udp->check;
+
+        if (old_udp_check != 0) {
+            if (bpf_l4_csum_replace(skb, udp_csum_off, old_dport, new_dport, sizeof(__u16)) != 0) {
+                return TC_ACT_OK;
+            }
+        }
+        if (bpf_skb_store_bytes(skb, udp_dport_off, &new_dport, sizeof(new_dport), 0) != 0) {
+            return TC_ACT_OK;
+        }
+
+        if (stats != (void*)0) {
+            stats->pass_packets += 1;
+        }
+        return TC_ACT_OK;
+    }
     if (action != BLACKBIRD_XDP_ACTION_REDIRECT && action != BLACKBIRD_XDP_ACTION_MIRROR) {
         return TC_ACT_OK;
     }

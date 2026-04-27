@@ -8,6 +8,16 @@ target_link_libraries(
         blackbird_project_warnings
 )
 
+add_executable(blackbird_xdp_fast_ctl src/fast_main.cpp)
+target_include_directories(blackbird_xdp_fast_ctl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(
+    blackbird_xdp_fast_ctl
+    PRIVATE
+        blackbird_common
+        blackbird_project_options
+        blackbird_project_warnings
+)
+
 find_program(
     BLACKBIRD_CLANG_EXECUTABLE
     NAMES
@@ -19,6 +29,7 @@ find_program(
 )
 if(BLACKBIRD_CLANG_EXECUTABLE)
     set(BLACKBIRD_XDP_BPF_OBJ ${CMAKE_CURRENT_BINARY_DIR}/blackbird_xdp_kern.o)
+    set(BLACKBIRD_XDP_FAST_BPF_OBJ ${CMAKE_CURRENT_BINARY_DIR}/blackbird_xdp_fast_kern.o)
     add_custom_command(
         OUTPUT ${BLACKBIRD_XDP_BPF_OBJ}
         COMMAND
@@ -37,11 +48,38 @@ if(BLACKBIRD_CLANG_EXECUTABLE)
             ${CMAKE_CURRENT_SOURCE_DIR}/include/blackbird/xdp/forward_config.h
         VERBATIM
     )
-    add_custom_target(blackbird_xdp_bpf DEPENDS ${BLACKBIRD_XDP_BPF_OBJ})
+    add_custom_command(
+        OUTPUT ${BLACKBIRD_XDP_FAST_BPF_OBJ}
+        COMMAND
+            ${BLACKBIRD_CLANG_EXECUTABLE}
+            -O2
+            -g
+            -target bpf
+            -D__TARGET_ARCH_x86
+            -Wall
+            -Werror
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include
+            -c ${CMAKE_CURRENT_SOURCE_DIR}/src/blackbird_xdp_fast_kern.c
+            -o ${BLACKBIRD_XDP_FAST_BPF_OBJ}
+        DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/blackbird_xdp_fast_kern.c
+        VERBATIM
+    )
+    add_custom_target(
+        blackbird_xdp_bpf
+        DEPENDS
+            ${BLACKBIRD_XDP_BPF_OBJ}
+            ${BLACKBIRD_XDP_FAST_BPF_OBJ}
+    )
     add_dependencies(blackbird_xdp_ctl blackbird_xdp_bpf)
+    add_dependencies(blackbird_xdp_fast_ctl blackbird_xdp_bpf)
     target_compile_definitions(
         blackbird_xdp_ctl
         PRIVATE BLACKBIRD_DEFAULT_XDP_OBJ_PATH="${BLACKBIRD_XDP_BPF_OBJ}"
+    )
+    target_compile_definitions(
+        blackbird_xdp_fast_ctl
+        PRIVATE BLACKBIRD_DEFAULT_XDP_FAST_OBJ_PATH="${BLACKBIRD_XDP_FAST_BPF_OBJ}"
     )
 else()
     message(

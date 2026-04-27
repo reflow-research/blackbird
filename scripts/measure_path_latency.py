@@ -36,6 +36,8 @@ class Config:
     mcast_port: int
     mcast_iface_ip: str
     mcast_source: str
+    local_udp_timestamp_source: str
+    mcast_udp_timestamp_source: str
     mcast_egress_iface: str
     samples: int
     timeout_sec: float
@@ -50,7 +52,7 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description=(
             "Measure added latency between local path and multicast path by matching "
-            "payload hashes and comparing kernel timestamps."
+            "payload hashes and comparing receive timestamps."
         )
     )
     parser.add_argument(
@@ -106,6 +108,24 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--local-udp-timestamp-source",
+        choices=("kernel", "userspace"),
+        default="kernel",
+        help=(
+            "Timestamp source when --local-source=udp. "
+            "kernel uses SO_TIMESTAMPNS; userspace uses time.time_ns() after recv."
+        ),
+    )
+    parser.add_argument(
+        "--mcast-udp-timestamp-source",
+        choices=("kernel", "userspace"),
+        default="kernel",
+        help=(
+            "Timestamp source when multicast side runs in udp mode. "
+            "kernel uses SO_TIMESTAMPNS; userspace uses time.time_ns() after recv."
+        ),
+    )
+    parser.add_argument(
         "--mcast-egress-iface",
         default="enp5s0f1",
         help="Interface used when --mcast-source=egress-packet.",
@@ -124,8 +144,8 @@ def parse_args() -> Config:
         default="flow-payload",
         help=(
             "Packet pairing key. flow-payload uses src_ip/src_port/udp_len+payload hash "
-            "(best for mixed traffic). payload uses payload hash only "
-            "(useful for loopback tests where flow fields may differ)."
+            "(best for mixed traffic, including UDP socket mode). payload uses payload hash only "
+            "(useful when flow fields differ by design)."
         ),
     )
     parser.add_argument(
@@ -182,6 +202,8 @@ def parse_args() -> Config:
         mcast_port=args.mcast_port,
         mcast_iface_ip=args.mcast_iface_ip,
         mcast_source=args.mcast_source,
+        local_udp_timestamp_source=args.local_udp_timestamp_source,
+        mcast_udp_timestamp_source=args.mcast_udp_timestamp_source,
         mcast_egress_iface=args.mcast_egress_iface,
         samples=args.samples,
         timeout_sec=args.timeout_sec,
@@ -193,18 +215,23 @@ def parse_args() -> Config:
     )
 
 
-def make_udp_socket(bind_ip: str, port: int) -> socket.socket:
+def make_udp_socket(bind_ip: str, port: int, use_kernel_timestamp: bool) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCVBUF_BYTES)
-    sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
+    if use_kernel_timestamp:
+        sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
     sock.bind((bind_ip, port))
     sock.setblocking(False)
     return sock
 
 
 def make_multicast_udp_socket(cfg: Config) -> socket.socket:
-    sock = make_udp_socket("0.0.0.0", cfg.mcast_port)
+    sock = make_udp_socket(
+        "0.0.0.0",
+        cfg.mcast_port,
+        use_kernel_timestamp=(cfg.mcast_udp_timestamp_source == "kernel"),
+    )
     membership = struct.pack(
         "4s4s",
         socket.inet_aton(cfg.mcast_group),
@@ -238,10 +265,31 @@ def recv_with_kernel_timestamp(sock: socket.socket) -> tuple[bytes, int, object]
     return data, timestamp_ns, addr
 
 
+def recv_with_timestamp(sock: socket.socket, timestamp_source: str) -> tuple[bytes, int, object]:
+    if timestamp_source == "userspace":
+        data, addr = sock.recvfrom(65535)
+        return data, time.time_ns(), addr
+    return recv_with_kernel_timestamp(sock)
+
+
 def packet_pkttype(addr: object) -> int | None:
     if isinstance(addr, tuple) and len(addr) >= 3 and isinstance(addr[2], int):
         return addr[2]
     return None
+
+
+def udp_addr_to_flow(addr: object) -> tuple[int, int] | None:
+    if not isinstance(addr, tuple) or len(addr) < 2:
+        return None
+    ip_text = addr[0]
+    src_port = addr[1]
+    if not isinstance(ip_text, str) or not isinstance(src_port, int):
+        return None
+    try:
+        src_ip_be = int.from_bytes(socket.inet_aton(ip_text), byteorder="big", signed=False)
+    except OSError:
+        return None
+    return src_ip_be, src_port
 
 
 def extract_udp_payload(
@@ -322,7 +370,11 @@ def percentile(sorted_values: list[float], q: float) -> float:
 
 def choose_local_socket(cfg: Config) -> tuple[socket.socket, str]:
     if cfg.local_source == "udp":
-        return make_udp_socket(cfg.bind_ip, cfg.local_port), "udp"
+        return make_udp_socket(
+            cfg.bind_ip,
+            cfg.local_port,
+            use_kernel_timestamp=(cfg.local_udp_timestamp_source == "kernel"),
+        ), "udp"
     return make_packet_socket(cfg.local_ingress_iface), "ingress-packet"
 
 
@@ -364,11 +416,13 @@ def main() -> int:
     print(
         "config:"
         f" local_mode={local_mode}"
-        f" local_port={cfg.local_port}"
+        f" local_udp_ts={cfg.local_udp_timestamp_source if local_mode == 'udp' else 'n/a'}"
+        f" local_port={cfg.local_port if local_mode == 'udp' else 'n/a'}"
         f" local_ingress_iface={cfg.local_ingress_iface}"
         f" local_flow_port={cfg.local_flow_port}"
         f" local_flow_direction={cfg.local_flow_direction}"
         f" mcast_mode={mcast_mode}"
+        f" mcast_udp_ts={cfg.mcast_udp_timestamp_source if mcast_mode == 'udp' else 'n/a'}"
         f" mcast={cfg.mcast_group}:{cfg.mcast_port}"
         f" mcast_egress_iface={cfg.mcast_egress_iface}"
         f" bind_ip={cfg.bind_ip}"
@@ -385,6 +439,10 @@ def main() -> int:
     selector = selectors.DefaultSelector()
     selector.register(local_sock, selectors.EVENT_READ, "local")
     selector.register(mcast_sock, selectors.EVENT_READ, "mcast")
+    side_timestamp_source = {
+        "local": cfg.local_udp_timestamp_source if local_mode == "udp" else "kernel",
+        "mcast": cfg.mcast_udp_timestamp_source if mcast_mode == "udp" else "kernel",
+    }
 
     pending_local: dict[bytes, deque[int]] = defaultdict(deque)
     pending_mcast: dict[bytes, deque[int]] = defaultdict(deque)
@@ -409,7 +467,10 @@ def main() -> int:
             events = selector.select(timeout=timeout)
 
             for key, _ in events:
-                raw_data, ts_ns, addr = recv_with_kernel_timestamp(key.fileobj)
+                raw_data, ts_ns, addr = recv_with_timestamp(
+                    key.fileobj,
+                    side_timestamp_source[key.data],
+                )
 
                 payload: bytes | None = None
                 src_ip_be = 0
@@ -419,6 +480,9 @@ def main() -> int:
                     if local_mode == "udp":
                         payload = raw_data
                         udp_len = len(raw_data) + 8
+                        flow = udp_addr_to_flow(addr)
+                        if flow is not None:
+                            src_ip_be, src_port = flow
                     else:
                         pkttype = packet_pkttype(addr)
                         if cfg.local_ingress_iface != "lo" and pkttype == PACKET_OUTGOING:
@@ -437,6 +501,9 @@ def main() -> int:
                     if mcast_mode == "udp":
                         payload = raw_data
                         udp_len = len(raw_data) + 8
+                        flow = udp_addr_to_flow(addr)
+                        if flow is not None:
+                            src_ip_be, src_port = flow
                     else:
                         pkttype = packet_pkttype(addr)
                         if pkttype is not None and pkttype != PACKET_OUTGOING:

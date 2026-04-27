@@ -46,6 +46,47 @@ sudo ./build/xdp/blackbird_xdp_ctl configure-send \
   auto auto 1
 ```
 
+### Local UDP Port Remap (`:7733 -> :8000` on same host)
+
+If you want packets to stay on the same host and be delivered to a different local UDP port, use `configure-local` (XDP rewrites UDP destination port, then `XDP_PASS` to kernel stack):
+
+```bash
+sudo ./build/xdp/blackbird_xdp_ctl configure-local \
+  enp5s0f0 any 7733 8000 1
+```
+
+This is for local socket delivery, not NIC-to-NIC redirect.
+
+## XDP Port-to-Port Fast Path (absolute fastest in this repo)
+
+When you only need raw port-to-port forwarding (`in_iface -> out_iface`) and do not need packet parsing, filtering, rewrite, or stats, use the dedicated fast-path executable.
+
+Fast-path attach + redirect (defaults to `xdpdrv` mode):
+
+```bash
+sudo ./build/xdp/blackbird_xdp_fast_ctl connect enp5s0f0 enp5s0f1
+```
+
+If NIC offload supports it, use `hw` mode for the lowest CPU path:
+
+```bash
+sudo ./build/xdp/blackbird_xdp_fast_ctl connect enp5s0f0 enp5s0f1 hw
+```
+
+Manage redirect separately:
+
+```bash
+sudo ./build/xdp/blackbird_xdp_fast_ctl set-port enp5s0f0 enp5s0f1
+sudo ./build/xdp/blackbird_xdp_fast_ctl disable enp5s0f0
+sudo ./build/xdp/blackbird_xdp_fast_ctl detach enp5s0f0
+```
+
+Performance order:
+
+- `xdpoffload` (`hw`) if your NIC supports XDP offload
+- `xdpdrv` (`drv`, default)
+- `xdpgeneric` (`skb`, slow fallback)
+
 ## XDP Recv (default receive mode)
 
 Configure receive classification on NIC:
@@ -113,6 +154,21 @@ See [benches/nic/README.md](benches/nic/README.md) for dual-host setup and examp
 
 Use `tc` when ingress is already owned by another XDP program (for example, validator on `enp5s0f0`) or when ingress is a tunnel device (`doublezero0`).
 Use `configure-send` for redirect mode (packet consumed by redirect), or `configure-mirror` for clone mode (packet is copied to egress and original continues in local stack/NAT).
+
+### TC local UDP port remap on tunnel ingress (`doublezero0`)
+
+For local delivery (no NIC redirect), rewrite UDP destination port and keep packet in local stack:
+
+```bash
+sudo ./build/tc/blackbird_tc_ctl attach doublezero0 ./build/tc/blackbird_tc_kern.o
+sudo ./build/tc/blackbird_tc_ctl configure-local doublezero0 239.10.10.10 7733 8000 1
+```
+
+Use `any` instead of `239.10.10.10` if you want to match all destination IPs:
+
+```bash
+sudo ./build/tc/blackbird_tc_ctl configure-local doublezero0 any 7733 8000 1
+```
 
 ### Single-source example (`doublezero0 -> 239.10.10.10:2003`)
 

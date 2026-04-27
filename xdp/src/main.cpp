@@ -464,6 +464,9 @@ auto action_to_text(const std::uint32_t action) noexcept -> const char* {
     if (action == BLACKBIRD_XDP_ACTION_REDIRECT) {
         return "redirect";
     }
+    if (action == BLACKBIRD_XDP_ACTION_REWRITE_PASS) {
+        return "rewrite-pass";
+    }
     if (action == BLACKBIRD_XDP_ACTION_MIRROR) {
         return "mirror";
     }
@@ -617,6 +620,63 @@ auto configure_recv_xdp(
     return true;
 }
 
+auto configure_local_xdp(
+    const char* iface,
+    const std::uint32_t match_ip_be,
+    const std::uint16_t match_port,
+    const std::uint16_t rewrite_port,
+    const bool collect_stats
+) noexcept -> bool {
+    auto map_fds = MapFds {};
+    if (!get_map_fds_for_iface(iface, map_fds)) {
+        return false;
+    }
+
+    auto cfg = blackbird_xdp_forward_config {};
+    cfg.enabled = 1;
+    cfg.action = BLACKBIRD_XDP_ACTION_REWRITE_PASS;
+    cfg.collect_stats = collect_stats ? 1U : 0U;
+    cfg.match_dst_ip_be = match_ip_be;
+    cfg.rewrite_dst_ip_be = 0;
+    cfg.match_dst_port_be = htons(match_port);
+    cfg.rewrite_dst_port_be = htons(rewrite_port);
+    cfg.rewrite_ttl = 0;
+
+    const auto zero_ifindex = std::uint32_t {0};
+    const auto update_cfg_ok = bpf_map_update(map_fds.cfg, kMapKeyZero, cfg);
+    const auto update_tx_ok = bpf_map_update(map_fds.tx_ports, kMapKeyZero, zero_ifindex);
+
+    if (!update_cfg_ok) {
+        common::log_error("cfg_map update failed: %s", std::strerror(errno));
+    }
+    if (!update_tx_ok) {
+        common::log_error("tx_ports update failed: %s", std::strerror(errno));
+    }
+
+    auto verify = blackbird_xdp_forward_config {};
+    const auto lookup_ok = bpf_map_lookup(map_fds.cfg, kMapKeyZero, verify);
+    if (!update_cfg_ok || !update_tx_ok || !lookup_ok) {
+        if (!lookup_ok) {
+            common::log_error("cfg_map lookup failed: %s", std::strerror(errno));
+        }
+        return false;
+    }
+
+    auto match_ip_text = std::array<char, INET_ADDRSTRLEN> {};
+    auto match_addr = in_addr {match_ip_be};
+    (void)::inet_ntop(AF_INET, &match_addr, match_ip_text.data(), match_ip_text.size());
+
+    common::log_info(
+        "xdp local configured: iface=%s match=%s:%u rewrite_port=%u action=rewrite-pass stats=%u",
+        iface,
+        match_ip_be == 0 ? "any" : match_ip_text.data(),
+        static_cast<unsigned>(match_port),
+        static_cast<unsigned>(rewrite_port),
+        cfg.collect_stats
+    );
+    return true;
+}
+
 auto disable_xdp_rule(const char* iface) noexcept -> bool {
     auto map_fds = MapFds {};
     if (!get_map_fds_for_iface(iface, map_fds)) {
@@ -712,6 +772,10 @@ auto print_usage(const char* prog) noexcept -> void {
     );
     common::log_error(
         "  %s configure-recv <iface> <group_ip|any> <group_port|0> [pass|drop] [collect_stats_0_or_1]",
+        prog
+    );
+    common::log_error(
+        "  %s configure-local <iface> <match_ip|any> <match_port|0> <local_port> [collect_stats_0_or_1]",
         prog
     );
     common::log_error("  %s disable <iface>", prog);
@@ -886,6 +950,49 @@ auto main(const int argc, char** argv) -> int {
                    match_ip_be,
                    match_port,
                    drop_mode,
+                   collect_stats
+               )
+            ? 0
+            : 1;
+    }
+
+    if (std::strcmp(argv[1], "configure-local") == 0 ||
+        std::strcmp(argv[1], "configure-port") == 0) {
+        if (argc < 6 || argc > 7) {
+            blackbird::xdp::print_usage(argv[0]);
+            return 2;
+        }
+
+        const auto* iface = argv[2];
+        auto match_ip_be = std::uint32_t {0};
+        if (!blackbird::xdp::parse_ipv4_be_or_any(argv[3], match_ip_be)) {
+            blackbird::common::log_error("invalid match_ip: %s", argv[3]);
+            return 2;
+        }
+
+        auto match_port = std::uint16_t {0};
+        if (!blackbird::xdp::parse_u16(argv[4], match_port)) {
+            blackbird::common::log_error("invalid match_port: %s", argv[4]);
+            return 2;
+        }
+
+        auto rewrite_port = std::uint16_t {0};
+        if (!blackbird::xdp::parse_u16(argv[5], rewrite_port) || rewrite_port == 0) {
+            blackbird::common::log_error("invalid local_port: %s", argv[5]);
+            return 2;
+        }
+
+        auto collect_stats = true;
+        if (argc == 7 && !blackbird::xdp::parse_bool_01(argv[6], collect_stats)) {
+            blackbird::common::log_error("invalid collect_stats: %s", argv[6]);
+            return 2;
+        }
+
+        return blackbird::xdp::configure_local_xdp(
+                   iface,
+                   match_ip_be,
+                   match_port,
+                   rewrite_port,
                    collect_stats
                )
             ? 0

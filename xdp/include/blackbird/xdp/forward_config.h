@@ -7,6 +7,7 @@
 #define BLACKBIRD_XDP_ACTION_PASS 2U
 #define BLACKBIRD_XDP_ACTION_DROP 3U
 #define BLACKBIRD_XDP_ACTION_MIRROR 4U
+#define BLACKBIRD_XDP_ACTION_REWRITE_PASS 5U
 
 struct blackbird_xdp_forward_config {
     uint32_t enabled;
