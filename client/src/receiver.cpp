@@ -18,9 +18,14 @@ namespace {
 
 auto print_usage(const char* prog) noexcept -> void {
     common::log_error(
-        "Usage: %s [group_ip] [port] [iface_ip] [batch] [print_payload] [cpu_core]",
+        "Usage: %s [multicast_or_unicast_ip] [port] [iface_ip] [batch] [print_payload] [cpu_core]",
         prog
     );
+}
+
+auto is_multicast_ipv4(const in_addr& addr) noexcept -> bool {
+    const auto host = std::uint32_t {ntohl(addr.s_addr)};
+    return (host & 0xf0000000U) == 0xe0000000U;
 }
 
 }  // namespace
@@ -31,8 +36,8 @@ Receiver::Receiver(const ReceiverConfig& cfg) noexcept : cfg_(cfg) {
 
 Receiver::~Receiver() noexcept {
     if (fd_ >= 0) {
-        if (::setsockopt(fd_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &membership_, sizeof(membership_)) <
-            0) {
+        if (membership_joined_ &&
+            ::setsockopt(fd_, IPPROTO_IP, IP_DROP_MEMBERSHIP, &membership_, sizeof(membership_)) < 0) {
             common::log_warn("setsockopt(IP_DROP_MEMBERSHIP) failed: %s", std::strerror(errno));
         }
         (void)::close(fd_);
@@ -104,18 +109,25 @@ auto Receiver::Init() noexcept -> bool {
         return false;
     }
 
-    membership_ = ip_mreq {};
-    if (::inet_pton(AF_INET, cfg_.group_ip, &membership_.imr_multiaddr) != 1) {
-        common::log_error("invalid multicast group: %s", cfg_.group_ip);
+    auto receive_addr = in_addr {};
+    if (::inet_pton(AF_INET, cfg_.group_ip, &receive_addr) != 1) {
+        common::log_error("invalid receive IP: %s", cfg_.group_ip);
         return false;
     }
-    if (::inet_pton(AF_INET, cfg_.iface_ip, &membership_.imr_interface) != 1) {
-        common::log_error("invalid interface IP: %s", cfg_.iface_ip);
-        return false;
-    }
-    if (::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership_, sizeof(membership_)) < 0) {
-        common::log_error("setsockopt(IP_ADD_MEMBERSHIP) failed: %s", std::strerror(errno));
-        return false;
+
+    const auto multicast_mode = is_multicast_ipv4(receive_addr);
+    if (multicast_mode) {
+        membership_ = ip_mreq {};
+        membership_.imr_multiaddr = receive_addr;
+        if (::inet_pton(AF_INET, cfg_.iface_ip, &membership_.imr_interface) != 1) {
+            common::log_error("invalid interface IP: %s", cfg_.iface_ip);
+            return false;
+        }
+        if (::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership_, sizeof(membership_)) < 0) {
+            common::log_error("setsockopt(IP_ADD_MEMBERSHIP) failed: %s", std::strerror(errno));
+            return false;
+        }
+        membership_joined_ = true;
     }
 
     const auto batch = std::size_t {cfg_.batch};
@@ -131,7 +143,8 @@ auto Receiver::Init() noexcept -> bool {
     }
 
     common::log_info(
-        "receiver: group=%s port=%u iface=%s batch=%u payload_bytes=%zu cpu=%d",
+        "receiver: mode=%s ip=%s port=%u iface=%s batch=%u payload_bytes=%zu cpu=%d",
+        multicast_mode ? "multicast" : "unicast",
         cfg_.group_ip,
         static_cast<unsigned>(cfg_.port),
         cfg_.iface_ip,

@@ -42,6 +42,7 @@ class Receiver final {
     const ReceiverConfig cfg_{};
     int fd_ = -1;
     ip_mreq membership_{};
+    bool membership_joined_ = false;
 
     alignas(common::kPageSize)
         std::array<std::array<char, common::kAlignedPayloadBytes>, common::kMaxBatch>

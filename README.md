@@ -153,7 +153,39 @@ See [benches/nic/README.md](benches/nic/README.md) for dual-host setup and examp
 ## TC ingress forwarder (for interfaces you cannot run Blackbird XDP on)
 
 Use `tc` when ingress is already owned by another XDP program (for example, validator on `enp5s0f0`) or when ingress is a tunnel device (`doublezero0`).
-Use `configure-send` for redirect mode (packet consumed by redirect), or `configure-mirror` for clone mode (packet is copied to egress and original continues in local stack/NAT).
+Use `configure-send` for redirect mode (packet consumed by redirect), `configure-mirror` for Ethernet clone mode (packet is copied to egress and original continues in local stack/NAT), or `configure-l3-mirror` for tunnel/L3 egress such as `doublezero0`.
+
+### TC tunnel/L3 mirror to DoubleZero (`doublezero0`)
+
+Use this when packets arrive on an Ethernet NIC and should also be cloned into a tunnel device like `doublezero0`.
+Unlike `configure-mirror`, L3 mirror mode does not read or rewrite Ethernet MAC addresses on the outbound interface.
+The destination IP can be unicast or multicast; for DoubleZero unicast, use the receiver host's DoubleZero-routed IP.
+
+```bash
+sudo env PATH=/usr/sbin:/sbin:/usr/bin:/bin \
+  ./build/tc/blackbird_tc_ctl attach enp5s0f0 ./build/tc/blackbird_tc_kern.o
+
+sudo env PATH=/usr/sbin:/sbin:/usr/bin:/bin \
+  ./build/tc/blackbird_tc_ctl configure-l3-mirror \
+  enp5s0f0 doublezero0 \
+  any 8000 \
+  <receiver_ip> 2003 \
+  1 1
+```
+
+The original packet still continues to the local `:8000` process. The cloned packet is rewritten to `<receiver_ip>:2003` and redirected out `doublezero0`.
+On the receiving host, unicast mode does not need a DoubleZero multicast group:
+
+```bash
+./build/client/blackbird_client <receiver_ip> 2003 0.0.0.0 64 0
+```
+
+If the destination is a DoubleZero multicast group instead, enable that group on the hosts that participate:
+
+```bash
+doublezero multicast publish <group_code>
+doublezero multicast subscribe <group_code>
+```
 
 ### TC local UDP port remap on tunnel ingress (`doublezero0`)
 

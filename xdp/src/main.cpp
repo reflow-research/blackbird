@@ -470,6 +470,9 @@ auto action_to_text(const std::uint32_t action) noexcept -> const char* {
     if (action == BLACKBIRD_XDP_ACTION_MIRROR) {
         return "mirror";
     }
+    if (action == BLACKBIRD_XDP_ACTION_L3_MIRROR) {
+        return "l3-mirror";
+    }
     if (action == BLACKBIRD_XDP_ACTION_PASS) {
         return "pass";
     }

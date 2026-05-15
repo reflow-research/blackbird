@@ -180,7 +180,8 @@ int blackbird_tc_mcast(struct __sk_buff* skb) {
         }
         return TC_ACT_OK;
     }
-    if (action != BLACKBIRD_XDP_ACTION_REDIRECT && action != BLACKBIRD_XDP_ACTION_MIRROR) {
+    if (action != BLACKBIRD_XDP_ACTION_REDIRECT && action != BLACKBIRD_XDP_ACTION_MIRROR &&
+        action != BLACKBIRD_XDP_ACTION_L3_MIRROR) {
         return TC_ACT_OK;
     }
 
@@ -251,7 +252,7 @@ int blackbird_tc_mcast(struct __sk_buff* skb) {
         return TC_ACT_OK;
     }
 
-    if (has_eth) {
+    if (has_eth && action != BLACKBIRD_XDP_ACTION_L3_MIRROR) {
         const __u32 eth_dst_off = 0U;
         const __u32 eth_src_off = (__u32)ETH_ALEN;
         if (bpf_skb_store_bytes(skb, eth_dst_off, cfg->rewrite_dst_mac, ETH_ALEN, 0) != 0) {
@@ -262,7 +263,7 @@ int blackbird_tc_mcast(struct __sk_buff* skb) {
         }
     }
 
-    if (action == BLACKBIRD_XDP_ACTION_MIRROR) {
+    if (action == BLACKBIRD_XDP_ACTION_MIRROR || action == BLACKBIRD_XDP_ACTION_L3_MIRROR) {
         const long clone_rc = bpf_clone_redirect(skb, *out_ifindex, 0);
         const __u64 csum_flags = BPF_F_RECOMPUTE_CSUM;
         __u8 restore_ok = 1;
@@ -277,7 +278,7 @@ int blackbird_tc_mcast(struct __sk_buff* skb) {
         if (bpf_skb_store_bytes(skb, udp_dport_off, &old_dport, sizeof(old_dport), csum_flags) != 0) {
             restore_ok = 0;
         }
-        if (has_eth) {
+        if (has_eth && action != BLACKBIRD_XDP_ACTION_L3_MIRROR) {
             const __u32 eth_dst_off = 0U;
             const __u32 eth_src_off = (__u32)ETH_ALEN;
             if (bpf_skb_store_bytes(skb, eth_dst_off, old_eth_dst, ETH_ALEN, 0) != 0) {

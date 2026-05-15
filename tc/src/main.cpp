@@ -29,6 +29,16 @@ constexpr auto kTxPortsMapName = "tx_ports";
 constexpr auto kStatsMapName = "stats_map";
 constexpr auto kMapKeyZero = std::uint32_t {0};
 constexpr auto kMaxStatsCpus = std::size_t {1024};
+constexpr auto kArphrdPpp = int {512};
+constexpr auto kArphrdRawIp = int {519};
+constexpr auto kArphrdTunnel = int {768};
+constexpr auto kArphrdTunnel6 = int {769};
+constexpr auto kArphrdSit = int {776};
+constexpr auto kArphrdIpGre = int {778};
+constexpr auto kArphrdPimReg = int {779};
+constexpr auto kArphrdIp6Gre = int {823};
+constexpr auto kArphrdVoid = int {0xFFFF};
+constexpr auto kArphrdNone = int {0xFFFE};
 
 alignas(64) static auto g_percpu_stats = std::array<blackbird_xdp_stats, kMaxStatsCpus> {};
 
@@ -183,6 +193,41 @@ auto read_iface_mac(const char* iface, std::array<std::uint8_t, 6>& out) noexcep
     out[4] = static_cast<std::uint8_t>(b4);
     out[5] = static_cast<std::uint8_t>(b5);
     return true;
+}
+
+auto read_iface_type(const char* iface, int& out) noexcept -> bool {
+    auto path = std::array<char, 256> {};
+    if (std::snprintf(path.data(), path.size(), "/sys/class/net/%s/type", iface) <= 0) {
+        return false;
+    }
+
+    auto* file = std::fopen(path.data(), "r");
+    if (file == nullptr) {
+        common::log_error("fopen(%s) failed: %s", path.data(), std::strerror(errno));
+        return false;
+    }
+
+    const auto ok = std::fscanf(file, "%d", &out) == 1;
+    (void)std::fclose(file);
+    return ok;
+}
+
+auto iface_is_l3_egress_type(const int iface_type) noexcept -> bool {
+    switch (iface_type) {
+        case kArphrdTunnel:
+        case kArphrdTunnel6:
+        case kArphrdSit:
+        case kArphrdIpGre:
+        case kArphrdIp6Gre:
+        case kArphrdVoid:
+        case kArphrdNone:
+        case kArphrdRawIp:
+        case kArphrdPimReg:
+        case kArphrdPpp:
+            return true;
+        default:
+            return false;
+    }
 }
 
 auto compute_multicast_mac(const std::uint32_t ip_be, std::array<std::uint8_t, 6>& out) noexcept
@@ -476,6 +521,9 @@ auto action_to_text(const std::uint32_t action) noexcept -> const char* {
     if (action == BLACKBIRD_XDP_ACTION_MIRROR) {
         return "mirror";
     }
+    if (action == BLACKBIRD_XDP_ACTION_L3_MIRROR) {
+        return "l3-mirror";
+    }
     if (action == BLACKBIRD_XDP_ACTION_PASS) {
         return "pass";
     }
@@ -507,6 +555,22 @@ auto configure_send_tc(
         return false;
     }
 
+    if (action == BLACKBIRD_XDP_ACTION_L3_MIRROR) {
+        auto out_iface_type = int {0};
+        if (!read_iface_type(out_iface, out_iface_type)) {
+            common::log_error("failed to read interface type for iface=%s", out_iface);
+            return false;
+        }
+        if (!iface_is_l3_egress_type(out_iface_type)) {
+            common::log_error(
+                "iface=%s has ARPHRD type %d; use configure-mirror for Ethernet egress",
+                out_iface,
+                out_iface_type
+            );
+            return false;
+        }
+    }
+
     auto cfg = blackbird_xdp_forward_config {};
     cfg.enabled = 1;
     cfg.action = action;
@@ -516,16 +580,19 @@ auto configure_send_tc(
     cfg.match_dst_port_be = htons(match_port);
     cfg.rewrite_dst_port_be = htons(rewrite_port);
     cfg.rewrite_ttl = rewrite_ttl;
+    const auto rewrite_l2 = action != BLACKBIRD_XDP_ACTION_L3_MIRROR;
     auto dst_mac = std::array<std::uint8_t, 6> {};
     auto src_mac = std::array<std::uint8_t, 6> {};
-    compute_multicast_mac(rewrite_ip_be, dst_mac);
-    if (!read_iface_mac(out_iface, src_mac)) {
-        common::log_error("failed to read source MAC for iface=%s", out_iface);
-        return false;
-    }
-    for (auto i = std::size_t {0}; i < dst_mac.size(); ++i) {
-        cfg.rewrite_dst_mac[i] = dst_mac[i];
-        cfg.rewrite_src_mac[i] = src_mac[i];
+    if (rewrite_l2) {
+        compute_multicast_mac(rewrite_ip_be, dst_mac);
+        if (!read_iface_mac(out_iface, src_mac)) {
+            common::log_error("failed to read source MAC for iface=%s", out_iface);
+            return false;
+        }
+        for (auto i = std::size_t {0}; i < dst_mac.size(); ++i) {
+            cfg.rewrite_dst_mac[i] = dst_mac[i];
+            cfg.rewrite_src_mac[i] = src_mac[i];
+        }
     }
 
     const auto update_cfg_ok = bpf_map_update(map_fds.cfg, kMapKeyZero, cfg);
@@ -554,8 +621,13 @@ auto configure_send_tc(
     auto rewrite_addr = in_addr {rewrite_ip_be};
     (void)::inet_ntop(AF_INET, &match_addr, match_ip_text.data(), match_ip_text.size());
     (void)::inet_ntop(AF_INET, &rewrite_addr, rewrite_ip_text.data(), rewrite_ip_text.size());
-    format_mac(dst_mac, dst_mac_text);
-    format_mac(src_mac, src_mac_text);
+    if (rewrite_l2) {
+        format_mac(dst_mac, dst_mac_text);
+        format_mac(src_mac, src_mac_text);
+    } else {
+        (void)std::snprintf(dst_mac_text.data(), dst_mac_text.size(), "%s", "n/a");
+        (void)std::snprintf(src_mac_text.data(), src_mac_text.size(), "%s", "n/a");
+    }
 
     common::log_info(
         "tc %s configured: in=%s out=%s ifindex=%u match=%s:%u rewrite=%s:%u "
@@ -736,6 +808,11 @@ auto print_usage(const char* prog) noexcept -> void {
         prog
     );
     common::log_error(
+        "  %s configure-l3-mirror <in_iface> <out_iface> <match_ip|any> <match_port|0> "
+        "<dst_ip> <dst_port> [ttl] [collect_stats_0_or_1]",
+        prog
+    );
+    common::log_error(
         "  %s configure-local <iface> <match_ip|any> <match_port|0> <local_port> [collect_stats_0_or_1]",
         prog
     );
@@ -776,7 +853,9 @@ auto main(const int argc, char** argv) -> int {
         std::strcmp(argv[1], "configure-send") == 0 || std::strcmp(argv[1], "configure") == 0;
     const auto is_configure_mirror =
         std::strcmp(argv[1], "configure-mirror") == 0 || std::strcmp(argv[1], "configure-clone") == 0;
-    if (is_configure_send || is_configure_mirror) {
+    const auto is_configure_l3_mirror = std::strcmp(argv[1], "configure-l3-mirror") == 0 ||
+        std::strcmp(argv[1], "configure-tunnel-mirror") == 0;
+    if (is_configure_send || is_configure_mirror || is_configure_l3_mirror) {
         if (argc < 8 || argc > 10) {
             blackbird::tc::print_usage(argv[0]);
             return 2;
@@ -799,13 +878,21 @@ auto main(const int argc, char** argv) -> int {
 
         auto rewrite_ip_be = std::uint32_t {0};
         if (!blackbird::tc::parse_ipv4_be(argv[6], rewrite_ip_be)) {
-            blackbird::common::log_error("invalid group_ip: %s", argv[6]);
+            blackbird::common::log_error(
+                "invalid %s: %s",
+                is_configure_l3_mirror ? "dst_ip" : "group_ip",
+                argv[6]
+            );
             return 2;
         }
 
         auto rewrite_port = std::uint16_t {0};
         if (!blackbird::tc::parse_u16(argv[7], rewrite_port) || rewrite_port == 0) {
-            blackbird::common::log_error("invalid group_port: %s", argv[7]);
+            blackbird::common::log_error(
+                "invalid %s: %s",
+                is_configure_l3_mirror ? "dst_port" : "group_port",
+                argv[7]
+            );
             return 2;
         }
 
@@ -824,9 +911,13 @@ auto main(const int argc, char** argv) -> int {
             return 2;
         }
 
-        const auto action = std::uint32_t {
-            is_configure_mirror ? BLACKBIRD_XDP_ACTION_MIRROR : BLACKBIRD_XDP_ACTION_REDIRECT
-        };
+        auto action = std::uint32_t {BLACKBIRD_XDP_ACTION_REDIRECT};
+        if (is_configure_mirror) {
+            action = BLACKBIRD_XDP_ACTION_MIRROR;
+        }
+        if (is_configure_l3_mirror) {
+            action = BLACKBIRD_XDP_ACTION_L3_MIRROR;
+        }
 
         return blackbird::tc::configure_send_tc(
                    in_iface,
